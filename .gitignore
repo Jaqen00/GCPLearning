@@ -1,0 +1,13 @@
+node_modules/
+out/
+.DS_Store
+*.tsbuildinfo
+
+# runtime data
+playwright-profile/
+traces/
+*.log
+
+# macOS / editor noise
+.idea/
+.vscode/
