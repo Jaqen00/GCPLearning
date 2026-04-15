@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   type AppSettings,
   DEFAULT_COURSE_URL,
+  type BrowserViewportBounds,
   type LearningRequiredAction,
   type LearningSessionState,
   type RecorderState
@@ -46,9 +47,10 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [message, setMessage] = useState(
-    '点一次“开始学习”，系统会自己检查登录、进入课程，并尽量自动继续学习。'
+    '点一次“开始学习”，系统会在内置学习页里检查登录、进入课程，并尽量自动继续学习。'
   )
   const [requiredAction, setRequiredAction] = useState<LearningRequiredAction>('none')
+  const browserViewportRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     void loadInitialState()
@@ -59,6 +61,60 @@ export default function App() {
 
     return () => {
       offState()
+    }
+  }, [])
+
+  useEffect(() => {
+    const node = browserViewportRef.current
+    if (!node) {
+      return
+    }
+
+    let frame = 0
+    let lastSerialized = ''
+
+    const publishBounds = () => {
+      cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        const currentNode = browserViewportRef.current
+        if (!currentNode) {
+          return
+        }
+
+        const rect = currentNode.getBoundingClientRect()
+        const nextBounds: BrowserViewportBounds | null =
+          rect.width > 0 && rect.height > 0
+            ? {
+                x: Math.round(rect.left),
+                y: Math.round(rect.top),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height)
+              }
+            : null
+
+        const serialized = JSON.stringify(nextBounds)
+        if (serialized === lastSerialized) {
+          return
+        }
+
+        lastSerialized = serialized
+        void window.recorder.setBrowserViewport(nextBounds)
+      })
+    }
+
+    const observer = new ResizeObserver(() => {
+      publishBounds()
+    })
+
+    observer.observe(node)
+    window.addEventListener('resize', publishBounds)
+    publishBounds()
+
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+      window.removeEventListener('resize', publishBounds)
+      void window.recorder.setBrowserViewport(null)
     }
   }, [])
 
@@ -133,153 +189,141 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell">
-      <section className="title-card">
-        <p className="eyebrow">Watching Assistant</p>
-        <div className="title-topline">
-          <h1>观看助手</h1>
-          <StatusPill status={summary.badge} />
-        </div>
-        <p className="subtitle">
-          自动打开课程、恢复播放、跟踪进度，只在必要的时候提醒你操作。
-        </p>
-      </section>
-
-      <section className="card settings-card">
-        <div className="section-head">
-          <h2>设置</h2>
-          <span className="muted-note">先设置，再开始学习</span>
-        </div>
-
-        <div className="settings-stack">
-          <SettingRow
-            title="播放页自动静音"
-            detail="进入课程播放页时，自动把当前学习页面静音。"
-            enabled={settings.mutePlaybackOnOpen}
-            disabled={busyAction !== null}
-            onToggle={() =>
-              handleSettingUpdate(
-                { mutePlaybackOnOpen: !settings.mutePlaybackOnOpen },
-                !settings.mutePlaybackOnOpen
-                  ? '已开启自动静音。后续进入播放页时会自动静音。'
-                  : '已关闭自动静音。后续进入播放页时不再自动静音。'
-              )
-            }
-          />
-
-          <SettingRow
-            title="自动定位到历史观看记录"
-            detail="进入播放页时，根据已保存的观看轨迹恢复到上次位置，并回退 10 秒继续播放。"
-            enabled={settings.resumeFromTrackedProgressOnOpen}
-            disabled={busyAction !== null}
-            onToggle={() =>
-              handleSettingUpdate(
-                { resumeFromTrackedProgressOnOpen: !settings.resumeFromTrackedProgressOnOpen },
-                !settings.resumeFromTrackedProgressOnOpen
-                  ? '已开启历史观看记录恢复。后续进入播放页时会自动回到上次位置并回退 10 秒。'
-                  : '已关闭历史观看记录恢复。后续进入播放页时不再自动定位到上次观看位置。'
-              )
-            }
-          />
-        </div>
-      </section>
-
-      <section className="card action-card">
-        <div className="section-head no-margin">
-          <div>
-            <p className="small-label">当前进展</p>
-            <h2>{summary.title}</h2>
+    <main className="app-shell app-shell-embedded">
+      <section className="dashboard-grid">
+        <section className="title-card hero-card">
+          <p className="eyebrow">Watching Assistant</p>
+          <div className="title-topline">
+            <div>
+              <h1>观看助手</h1>
+              <p className="subtitle">
+                在客户端内直接托管学习页面，自动检查登录、进入课程、恢复播放并推进下一节。
+              </p>
+            </div>
+            <StatusPill status={summary.badge} />
           </div>
-        </div>
+        </section>
 
-        <p className="action-copy">{summary.detail}</p>
-
-        <button
-          className="button button-primary button-main"
-          disabled={busyAction !== null}
-          onClick={handleStartLearning}
-        >
-          {mainButtonLabel}
-        </button>
-      </section>
-
-      <section className="card compact-status-card">
-        <div className="section-head">
-          <h2>状态</h2>
-          <span className="muted-note">{humanStatus(session, state.isBrowserOpen)}</span>
-        </div>
-
-        <div className="status-grid">
-          <StatusItem label="课程" value={session.currentCourseTitle || '未进入'} />
-          <StatusItem label="章节" value={session.currentChapterTitle || '未进入'} />
-          <StatusItem label="页面" value={routeLabel(session.routeKind)} />
-          <StatusItem label="进度" value={progressLabel(session)} />
-        </div>
-
-        <div className="mini-progress">
-          <div className="mini-progress-topline">
-            <span>播放进度</span>
-            <strong>{progressLabel(session)}</strong>
+        <section className="card action-card control-card">
+          <div className="section-head no-margin">
+            <div>
+              <p className="small-label">当前进展</p>
+              <h2>{summary.title}</h2>
+            </div>
+            <span className="muted-note">{humanStatus(session, state.isBrowserOpen)}</span>
           </div>
-          <div className="progress-track">
-            <div className="progress-bar" style={{ width: `${videoProgressPercent(session)}%` }} />
+
+          <p className="action-copy">{summary.detail}</p>
+
+          <div className="action-buttons">
+            <button
+              className="button button-primary button-main"
+              disabled={busyAction !== null}
+              onClick={handleStartLearning}
+            >
+              {mainButtonLabel}
+            </button>
+
+            <button
+              className="button button-ghost"
+              disabled={busyAction !== null}
+              onClick={handleCheckStatus}
+            >
+              重新检查状态
+            </button>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section className="card guidance-card">
-        <div className="section-head">
-          <h2>提示</h2>
-          <span className="muted-note">只在需要时提醒</span>
-        </div>
+        <section className="card settings-card compact-card">
+          <div className="section-head">
+            <h2>设置</h2>
+            <span className="muted-note">先设置，再开始学习</span>
+          </div>
 
-        <div className="hint-stack">
-          {requiredAction === 'manual-attention' && session.loginStatus !== 'logged-in' ? (
-            <HintRow
-              title="请先完成登录"
-              detail="在学习浏览器里完成登录后，系统会自动继续进入课程。"
+          <div className="settings-stack">
+            <SettingRow
+              title="播放页自动静音"
+              detail="进入课程播放页时，自动把当前学习页静音。"
+              enabled={settings.mutePlaybackOnOpen}
+              disabled={busyAction !== null}
+              onToggle={() =>
+                handleSettingUpdate(
+                  { mutePlaybackOnOpen: !settings.mutePlaybackOnOpen },
+                  !settings.mutePlaybackOnOpen
+                    ? '已开启自动静音。后续进入播放页时会自动静音。'
+                    : '已关闭自动静音。后续进入播放页时不再自动静音。'
+                )
+              }
             />
-          ) : null}
 
-          {session.continuePromptVisible ? (
-            <HintRow
-              title="检测到继续学习提示"
-              detail="系统会尝试自动确认并继续播放。"
+            <SettingRow
+              title="自动定位到历史观看记录"
+              detail="进入播放页时，按已记录进度回到上次位置，并回退 10 秒继续播放。"
+              enabled={settings.resumeFromTrackedProgressOnOpen}
+              disabled={busyAction !== null}
+              onToggle={() =>
+                handleSettingUpdate(
+                  { resumeFromTrackedProgressOnOpen: !settings.resumeFromTrackedProgressOnOpen },
+                  !settings.resumeFromTrackedProgressOnOpen
+                    ? '已开启历史观看记录恢复。后续进入播放页时会自动回到上次位置并回退 10 秒。'
+                    : '已关闭历史观看记录恢复。后续进入播放页时不再自动定位到上次观看位置。'
+                )
+              }
             />
-          ) : null}
+          </div>
+        </section>
 
-          {session.routeKind === 'video-play' && session.video.playing ? (
-            <HintRow
-              title="正在自动学习"
-              detail="当前已进入播放页，系统会继续监控进度并推进下一节。"
-            />
-          ) : null}
+        <section className="card status-card compact-card">
+          <div className="section-head">
+            <h2>状态</h2>
+            <span className="muted-note">{routeLabel(session.routeKind)}</span>
+          </div>
 
-          {!(
-            (requiredAction === 'manual-attention' && session.loginStatus !== 'logged-in') ||
-            session.continuePromptVisible ||
-            (session.routeKind === 'video-play' && session.video.playing)
-          ) ? (
-            <HintRow
-              title="当前无需额外操作"
-              detail="保持客户端开启即可，系统会继续自动处理。"
-            />
-          ) : null}
-        </div>
+          <div className="status-grid">
+            <StatusItem label="课程" value={session.currentCourseTitle || '未进入'} />
+            <StatusItem label="章节" value={session.currentChapterTitle || '未进入'} />
+            <StatusItem label="页面" value={routeLabel(session.routeKind)} />
+            <StatusItem label="进度" value={progressLabel(session)} />
+          </div>
 
-        <div className="utility-row">
-          <button
-            className="button button-ghost"
-            disabled={busyAction !== null}
-            onClick={handleCheckStatus}
-          >
-            重新检查状态
-          </button>
-        </div>
+          <div className="mini-progress">
+            <div className="mini-progress-topline">
+              <span>播放进度</span>
+              <strong>{progressLabel(session)}</strong>
+            </div>
+            <div className="progress-track">
+              <div className="progress-bar" style={{ width: `${videoProgressPercent(session)}%` }} />
+            </div>
+          </div>
+
+          <div className="hint-stack hint-stack-compact">
+            {buildHints(requiredAction, session).map((hint) => (
+              <HintRow key={hint.title} title={hint.title} detail={hint.detail} />
+            ))}
+          </div>
+        </section>
       </section>
 
       <section className="message-strip">
         <p>{message}</p>
+      </section>
+
+      <section className="card browser-card">
+        <div className="section-head">
+          <h2>学习页</h2>
+          <span className="muted-note">
+            {state.isBrowserOpen ? 'Electron 内置浏览器已接管' : '等待打开学习页'}
+          </span>
+        </div>
+
+        <div className="browser-viewport" ref={browserViewportRef}>
+          {!state.isBrowserOpen ? (
+            <div className="browser-placeholder">
+              <strong>学习页会显示在这里</strong>
+              <p>点击“开始学习”后，系统会在客户端内打开首页、检查登录状态并继续推进课程。</p>
+            </div>
+          ) : null}
+        </div>
       </section>
     </main>
   )
@@ -357,7 +401,11 @@ function humanStatus(session: LearningSessionState, isBrowserOpen: boolean) {
   if (session.loginStatus === 'logged-out') {
     return '等待登录'
   }
-  if (session.routeKind === 'my-classes' || session.routeKind === 'my-course' || session.routeKind === 'course-detail') {
+  if (
+    session.routeKind === 'my-classes' ||
+    session.routeKind === 'my-course' ||
+    session.routeKind === 'course-detail'
+  ) {
     return '准备进入课程'
   }
   return '准备就绪'
@@ -416,7 +464,7 @@ function buildSummary(session: LearningSessionState, isBrowserOpen: boolean) {
     return {
       badge: 'waiting' as const,
       title: '等待启动',
-      detail: '点击开始学习后，系统会打开学习浏览器并检查当前会话。'
+      detail: '点击开始学习后，系统会在客户端里打开内置学习页并检查当前会话。'
     }
   }
 
@@ -424,7 +472,7 @@ function buildSummary(session: LearningSessionState, isBrowserOpen: boolean) {
     return {
       badge: 'waiting' as const,
       title: '等待你完成登录',
-      detail: '当前只需要在学习浏览器里登录。登录成功后，系统会自动继续进入课程。'
+      detail: '当前只需要在下方学习页里登录。登录成功后，系统会自动继续进入课程。'
     }
   }
 
@@ -445,12 +493,48 @@ function buildSummary(session: LearningSessionState, isBrowserOpen: boolean) {
   }
 }
 
+function buildHints(requiredAction: LearningRequiredAction, session: LearningSessionState) {
+  if (requiredAction === 'manual-attention' && session.loginStatus !== 'logged-in') {
+    return [
+      {
+        title: '请先完成登录',
+        detail: '在下方学习页里完成登录后，系统会自动继续进入课程。'
+      }
+    ]
+  }
+
+  if (session.continuePromptVisible) {
+    return [
+      {
+        title: '检测到继续学习提示',
+        detail: '系统会自动尝试确认并继续播放。'
+      }
+    ]
+  }
+
+  if (session.routeKind === 'video-play' && session.video.playing) {
+    return [
+      {
+        title: '正在自动学习',
+        detail: '当前已进入播放页，系统会继续监控进度并推进下一节。'
+      }
+    ]
+  }
+
+  return [
+    {
+      title: '当前无需额外操作',
+      detail: '保持客户端开启即可，系统会继续自动处理。'
+    }
+  ]
+}
+
 function describeSession(session: LearningSessionState) {
   if (session.routeKind === 'video-play' && session.video.playing) {
     return '当前已经在播放页并正在学习。'
   }
   if (session.loginStatus === 'logged-out') {
-    return '当前还没有有效登录状态，请在学习浏览器中登录。'
+    return '当前还没有有效登录状态，请在下方学习页中登录。'
   }
   if (session.routeKind === 'my-classes') {
     return '当前已经进入我的专题班，系统会继续自动推进到课程播放页。'

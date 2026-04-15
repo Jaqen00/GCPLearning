@@ -15,10 +15,10 @@ let recorder: BrowserRecorderService | null = null
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 640,
-    height: 900,
-    minWidth: 580,
-    minHeight: 760,
+    width: 1320,
+    height: 920,
+    minWidth: 1080,
+    minHeight: 780,
     title: '观看助手',
     backgroundColor: '#091019',
     show: false,
@@ -29,6 +29,8 @@ function createMainWindow(): void {
       nodeIntegration: false
     }
   })
+
+  recorder?.attachHostWindow(mainWindow)
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
@@ -79,6 +81,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('settings:update', async (_event, patch) => {
     return getRecorder().updateSettings(patch)
+  })
+
+  ipcMain.handle('learning:set-browser-viewport', async (_event, bounds) => {
+    await getRecorder().updateBrowserViewport(bounds)
   })
 
   ipcMain.handle('learning:start', async () => {

@@ -12,6 +12,13 @@ export interface AppSettings {
   resumeFromTrackedProgressOnOpen: boolean
 }
 
+export interface BrowserViewportBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 export type RecorderEventType =
   | 'recording-started'
   | 'recording-stopped'
@@ -161,6 +168,7 @@ export interface RecorderApi {
   getLatestTrace: () => Promise<RecordedTraceBundle | null>
   loadSettings: () => Promise<AppSettings>
   updateSettings: (patch: Partial<AppSettings>) => Promise<AppSettings>
+  setBrowserViewport: (bounds: BrowserViewportBounds | null) => Promise<void>
   startLearning: () => Promise<LearningRunResult>
   resumeManagedSession: () => Promise<RecorderState>
   inspectSession: () => Promise<LearningSessionState>

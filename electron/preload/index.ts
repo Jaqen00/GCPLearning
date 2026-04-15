@@ -14,6 +14,7 @@ const api: RecorderApi = {
   getLatestTrace: () => ipcRenderer.invoke('recorder:get-latest-trace'),
   loadSettings: () => ipcRenderer.invoke('settings:load'),
   updateSettings: (patch: Partial<AppSettings>) => ipcRenderer.invoke('settings:update', patch),
+  setBrowserViewport: (bounds) => ipcRenderer.invoke('learning:set-browser-viewport', bounds),
   startLearning: () => ipcRenderer.invoke('learning:start'),
   resumeManagedSession: () => ipcRenderer.invoke('learning:resume-session'),
   inspectSession: () => ipcRenderer.invoke('learning:inspect-session'),
