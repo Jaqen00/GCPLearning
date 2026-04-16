@@ -92,7 +92,10 @@ release/
 - `macos-latest` 上构建 `dmg`
 - `windows-latest` 上构建 `nsis exe`
 
-如果是标签发布，构建完成后会自动把安装包作为 Release 资产上传到 GitHub Releases。
+发布方式支持两种：
+
+- 手动触发时，可以选择只生成 Artifacts，或者直接创建 Release
+- 推送 `v*` 标签时，会自动构建并创建更完整的 Release
 
 示例标签发布流程：
 
@@ -100,6 +103,13 @@ release/
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+手动触发时建议填写：
+
+- `create_release`: `true`
+- `release_version`: 例如 `0.1.0`
+- `release_name`: 可选，例如 `GCP学习辅助工具 v0.1.0`
+- `release_notes`: 可选，自定义补充发布说明
 
 ## 打包资源
 

@@ -2,6 +2,29 @@ name: Release Installers
 
 on:
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 构建完成后是否创建 GitHub Release
+        required: false
+        default: false
+        type: boolean
+      release_version:
+        description: 手动创建 Release 时填写版本号，例如 0.1.0
+        required: false
+        type: string
+      release_name:
+        description: 自定义 Release 标题，可留空
+        required: false
+        type: string
+      release_notes:
+        description: 补充发布说明，可留空
+        required: false
+        type: string
+      draft_release:
+        description: 手动创建 Release 时是否设为草稿
+        required: false
+        default: true
+        type: boolean
   push:
     tags:
       - 'v*'
@@ -54,9 +77,69 @@ jobs:
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
 
+  prepare-release:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      release_body: ${{ steps.meta.outputs.release_body }}
+      draft: ${{ steps.meta.outputs.draft }}
+
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+            VERSION="${TAG_NAME#v}"
+            DRAFT="false"
+          else
+            VERSION="${{ inputs.release_version }}"
+            if [[ -z "${VERSION}" ]]; then
+              echo "release_version is required when create_release is true" >&2
+              exit 1
+            fi
+            TAG_NAME="v${VERSION}"
+            DRAFT="${{ inputs.draft_release }}"
+          fi
+
+          if [[ -n "${{ inputs.release_name }}" ]]; then
+            RELEASE_NAME="${{ inputs.release_name }}"
+          else
+            RELEASE_NAME="GCP学习辅助工具 ${TAG_NAME}"
+          fi
+
+          {
+            echo "tag_name=${TAG_NAME}"
+            echo "release_name=${RELEASE_NAME}"
+            echo "draft=${DRAFT}"
+            echo "release_body<<EOF"
+            echo "## 安装包"
+            echo
+            echo "- macOS：DMG 安装包"
+            echo "- Windows：NSIS EXE 安装包"
+            echo
+            echo "## 使用说明"
+            echo
+            echo "- 下载与你系统对应的安装包后直接安装"
+            echo "- 首次打开时请按系统提示完成安装与权限确认"
+            echo "- 本软件主要用于辅助课程播放与操作管理，请认真学习课程内容，合理使用"
+            if [[ -n "${{ inputs.release_notes }}" ]]; then
+              echo
+              echo "## 补充说明"
+              echo
+              echo "${{ inputs.release_notes }}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+    needs:
+      - build
+      - prepare-release
     runs-on: ubuntu-latest
 
     steps:
@@ -68,8 +151,12 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
-          generate_release_notes: true
+          tag_name: ${{ needs.prepare-release.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.prepare-release.outputs.release_name }}
+          body: ${{ needs.prepare-release.outputs.release_body }}
+          draft: ${{ needs.prepare-release.outputs.draft == 'true' }}
+          generate_release_notes: false
           files: |
             release-artifacts/**/*.dmg
             release-artifacts/**/*.exe
