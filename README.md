@@ -52,6 +52,68 @@ npm run preview
 npm run build
 ```
 
+## 安装包构建
+
+当前项目已经接入 `electron-builder`，可生成直接安装的桌面应用。
+
+本地构建目录版：
+
+```bash
+npm run dist:dir
+```
+
+本地构建 mac 安装包：
+
+```bash
+npm run dist:mac
+```
+
+本地构建 Windows 安装包：
+
+```bash
+npm run dist:win
+```
+
+构建产物默认输出到：
+
+```text
+release/
+```
+
+## GitHub 发布流程
+
+仓库已预留 GitHub Actions 工作流：
+
+- 手动触发：`workflow_dispatch`
+- 自动触发：推送 `v*` 标签时
+
+工作流会分别在：
+
+- `macos-latest` 上构建 `dmg / zip`
+- `windows-latest` 上构建 `nsis exe`
+
+如果是标签发布，构建完成后会自动把安装包作为 Release 资产上传到 GitHub Releases。
+
+示例标签发布流程：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+## 打包资源
+
+打包图标资源建议放在：
+
+```text
+build/
+```
+
+常用命名：
+
+- `build/icon.icns`
+- `build/icon.ico`
+
 ## 项目结构
 
 ```text

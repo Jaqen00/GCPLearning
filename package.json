@@ -1,6 +1,7 @@
 {
-  "name": "course-automation-studio",
+  "name": "gcplearning",
   "version": "0.1.0",
+  "description": "GCP学习辅助工具，提供独立学习窗口、课程状态跟踪与播放辅助控制。",
   "private": true,
   "type": "module",
   "main": "./out/main/index.js",
@@ -8,7 +9,14 @@
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "dist:dir": "npm run build && electron-builder --dir --publish never",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip --publish never",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jaqen00/GCPLearning.git"
   },
   "dependencies": {
     "react": "^18.2.0",
@@ -20,8 +28,59 @@
     "@types/react-dom": "^18.2.22",
     "@vitejs/plugin-react": "^4.2.1",
     "electron": "^30.0.0",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^2.1.0",
     "typescript": "^5.4.5",
     "vite": "^5.2.8"
+  },
+  "build": {
+    "appId": "com.jaqen.gcplearning",
+    "productName": "GCP学习辅助工具",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "mac": {
+      "category": "public.app-category.education",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-setup-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }
