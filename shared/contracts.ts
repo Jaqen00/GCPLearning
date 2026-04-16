@@ -12,13 +12,6 @@ export interface AppSettings {
   resumeFromTrackedProgressOnOpen: boolean
 }
 
-export interface BrowserViewportBounds {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
 export type RecorderEventType =
   | 'recording-started'
   | 'recording-stopped'
@@ -71,7 +64,7 @@ export interface RecorderState {
   baseUrl: string
   isBrowserOpen: boolean
   isRecording: boolean
-  profilePath: string
+  sessionDataPath: string
   recordingsPath: string
   activePageUrl?: string
   activePageTitle?: string
@@ -168,8 +161,10 @@ export interface RecorderApi {
   getLatestTrace: () => Promise<RecordedTraceBundle | null>
   loadSettings: () => Promise<AppSettings>
   updateSettings: (patch: Partial<AppSettings>) => Promise<AppSettings>
-  setBrowserViewport: (bounds: BrowserViewportBounds | null) => Promise<void>
+  setPreferredWindowHeight: (height: number) => Promise<void>
   startLearning: () => Promise<LearningRunResult>
+  pauseLearning: () => Promise<LearningRunResult>
+  resumeLearning: () => Promise<LearningRunResult>
   resumeManagedSession: () => Promise<RecorderState>
   inspectSession: () => Promise<LearningSessionState>
   submitLoginAfterCaptcha: () => Promise<LearningSessionState>

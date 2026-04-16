@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
-import { join } from 'node:path'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { DEFAULT_COURSE_URL } from '@shared/contracts'
 import { BrowserRecorderService } from './browserRecorder'
 
@@ -12,13 +13,17 @@ const VITE_DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL
 
 let mainWindow: BrowserWindow | null = null
 let recorder: BrowserRecorderService | null = null
+let screenshotCaptured = false
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1320,
-    height: 920,
-    minWidth: 1080,
-    minHeight: 780,
+    width: 500,
+    height: 620,
+    minWidth: 440,
+    minHeight: 520,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
     title: '观看助手',
     backgroundColor: '#091019',
     show: false,
@@ -52,11 +57,35 @@ function createMainWindow(): void {
     if (currentState) {
       mainWindow?.webContents.send('recorder:state', currentState)
     }
+
+    void maybeCaptureMainWindowScreenshot()
   })
 
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+}
+
+async function maybeCaptureMainWindowScreenshot(): Promise<void> {
+  const targetPath = process.env.APP_SCREENSHOT_PATH
+  if (!targetPath || screenshotCaptured || !mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+
+  screenshotCaptured = true
+
+  await new Promise((resolve) => setTimeout(resolve, 700))
+  const image = await mainWindow.webContents.capturePage().catch(() => null)
+  if (!image) {
+    return
+  }
+
+  await mkdir(dirname(targetPath), { recursive: true }).catch(() => undefined)
+  await writeFile(targetPath, image.toPNG()).catch(() => undefined)
+
+  setTimeout(() => {
+    app.quit()
+  }, 300)
 }
 
 function getRecorder(): BrowserRecorderService {
@@ -83,12 +112,39 @@ function registerIpcHandlers(): void {
     return getRecorder().updateSettings(patch)
   })
 
-  ipcMain.handle('learning:set-browser-viewport', async (_event, bounds) => {
-    await getRecorder().updateBrowserViewport(bounds)
+  ipcMain.handle('window:set-preferred-height', async (_event, height: number) => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return
+    }
+
+    const nextContentHeight = Math.max(520, Math.min(900, Math.round(height)))
+    const contentBounds = mainWindow.getContentBounds()
+    const windowBounds = mainWindow.getBounds()
+    const chromeHeight = windowBounds.height - contentBounds.height
+    const nextWindowHeight = nextContentHeight + chromeHeight
+
+    if (Math.abs(windowBounds.height - nextWindowHeight) < 8) {
+      return
+    }
+
+    mainWindow.setBounds({
+      x: windowBounds.x,
+      y: windowBounds.y,
+      width: windowBounds.width,
+      height: nextWindowHeight
+    })
   })
 
   ipcMain.handle('learning:start', async () => {
     return getRecorder().startLearning()
+  })
+
+  ipcMain.handle('learning:pause', async () => {
+    return getRecorder().pauseLearning()
+  })
+
+  ipcMain.handle('learning:resume', async () => {
+    return getRecorder().resumeLearning()
   })
 
   ipcMain.handle('learning:resume-session', async () => {
@@ -138,7 +194,7 @@ function registerIpcHandlers(): void {
 
 app.whenReady().then(() => {
   recorder = new BrowserRecorderService({
-    profileDir: join(app.getPath('userData'), 'playwright-profile'),
+    sessionDataDir: join(app.getPath('userData'), 'managed-session-data'),
     tracesDir: join(app.getPath('documents'), 'CourseAutomationStudio', 'traces'),
     settingsFile: join(app.getPath('userData'), 'settings.json'),
     baseUrl: DEFAULT_COURSE_URL,

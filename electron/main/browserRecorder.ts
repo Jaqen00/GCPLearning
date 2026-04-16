@@ -2,15 +2,12 @@ import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promise
 import { dirname, join } from 'node:path'
 import {
   BrowserWindow,
-  WebContentsView,
   session,
   shell,
-  type Rectangle,
   type WebContents
 } from 'electron'
 import {
   type AppSettings,
-  type BrowserViewportBounds,
   DEFAULT_COURSE_URL,
   DEFAULT_MY_CLASSES_URL,
   type ExportTraceResult,
@@ -30,7 +27,7 @@ const MANAGED_PARTITION = 'persist:course-automation-managed'
 const PAGE_ID = 'page_managed'
 
 interface BrowserRecorderServiceOptions {
-  profileDir: string
+  sessionDataDir: string
   tracesDir: string
   settingsFile: string
   baseUrl?: string
@@ -69,11 +66,11 @@ interface PopupExpectation {
 }
 
 export class BrowserRecorderService {
-  private hostWindow: BrowserWindow | null = null
-  private managedView: WebContentsView | null = null
-  private browserBounds: Rectangle | null = null
+  private controlWindow: BrowserWindow | null = null
+  private learningWindow: BrowserWindow | null = null
   private readonly managedSession = session.fromPartition(MANAGED_PARTITION)
   private readonly auxiliaryWindows = new Set<BrowserWindow>()
+  private readonly sessionStateFile: string
   private readonly settingsFile: string
   private readonly onStateChange?: (state: RecorderState) => void
   private readonly onEvent?: (event: RecordedEvent) => void
@@ -84,6 +81,8 @@ export class BrowserRecorderService {
   private networkObserversAttached = false
   private networkEventCounter = 0
   private networkLogFile: string | null = null
+  private sessionStateLoaded = false
+  private sessionPersistTimer: NodeJS.Timeout | null = null
   private lastPlaybackObservation: PlaybackObservation | null = null
   private lastResumeAppliedKey: string | null = null
   private popupExpectation: PopupExpectation | null = null
@@ -95,6 +94,7 @@ export class BrowserRecorderService {
   private state: RecorderState
 
   constructor(options: BrowserRecorderServiceOptions) {
+    this.sessionStateFile = join(options.sessionDataDir, 'session-state.json')
     this.settingsFile = options.settingsFile
     this.onStateChange = options.onStateChange
     this.onEvent = options.onEvent
@@ -103,7 +103,7 @@ export class BrowserRecorderService {
       baseUrl: options.baseUrl ?? DEFAULT_COURSE_URL,
       isBrowserOpen: false,
       isRecording: false,
-      profilePath: options.profileDir,
+      sessionDataPath: options.sessionDataDir,
       recordingsPath: options.tracesDir,
       eventCount: 0,
       networkCaptureEnabled: true,
@@ -111,37 +111,26 @@ export class BrowserRecorderService {
       networkPurposeCounts: {},
       settings: defaultAppSettings(),
       siteHints: [
-        '学习页已经迁移到 Electron 内置浏览器视图，不再依赖外部 Playwright 窗口。',
+        '学习页会在单独的 Electron 学习窗口中打开，不再挤在主控界面里。',
         '登录状态会保存在应用的持久化会话分区里，下次打开会优先复用。',
         '课程播放、继续学习提示和下一节推进，都会只绑定在应用托管的学习页上。'
       ]
     }
+
+    this.attachSessionPersistence()
   }
 
   attachHostWindow(window: BrowserWindow): void {
-    if (this.hostWindow === window) {
-      this.applyManagedViewBounds()
+    if (this.controlWindow === window) {
       return
     }
 
-    if (this.hostWindow && !this.hostWindow.isDestroyed()) {
-      this.hostWindow.removeListener('resize', this.handleHostLayoutChange)
-      this.hostWindow.removeListener('closed', this.handleHostClosed)
+    if (this.controlWindow && !this.controlWindow.isDestroyed()) {
+      this.controlWindow.removeListener('closed', this.handleControlClosed)
     }
 
-    this.hostWindow = window
-    window.on('resize', this.handleHostLayoutChange)
-    window.on('closed', this.handleHostClosed)
-
-    if (this.managedView) {
-      window.contentView.addChildView(this.managedView)
-      this.applyManagedViewBounds()
-    }
-  }
-
-  async updateBrowserViewport(bounds: BrowserViewportBounds | null): Promise<void> {
-    this.browserBounds = normalizeViewportBounds(bounds)
-    this.applyManagedViewBounds()
+    this.controlWindow = window
+    window.on('closed', this.handleControlClosed)
   }
 
   getState(): RecorderState {
@@ -220,6 +209,7 @@ export class BrowserRecorderService {
       session = await this.acknowledgeContinuePrompt()
     }
 
+    session = await this.stabilizeLearningSession(session, 3_500)
     this.startAutomationLoop()
 
     if (session.routeKind === 'video-play') {
@@ -237,6 +227,39 @@ export class BrowserRecorderService {
       '已经推进到课程相关页面，但还没完全稳定进入播放页。当前需要人工关注一次。',
       'manual-attention'
     )
+  }
+
+  async pauseLearning(): Promise<LearningRunResult> {
+    await this.ensureManagedWebContents(this.state.baseUrl)
+    this.stopAutomationLoop()
+
+    let session = await this.inspectSession()
+    if (session.routeKind === 'video-play' && session.video.exists) {
+      await this.pauseVideoPlayback()
+      await sleep(300)
+      session = await this.inspectSession()
+      return this.createLearningResult(session, '已暂停当前学习。点击“继续学习”后会恢复播放与自动推进。', 'none')
+    }
+
+    return this.createLearningResult(session, '当前不在可暂停的播放页，自动推进已停止。', 'none')
+  }
+
+  async resumeLearning(): Promise<LearningRunResult> {
+    await this.ensureManagedWebContents(this.state.baseUrl)
+    let session = await this.inspectSession()
+
+    if (session.continuePromptVisible && session.routeKind === 'video-play') {
+      session = await this.acknowledgeContinuePrompt()
+    }
+
+    if (session.routeKind === 'video-play') {
+      await this.resumeVideoPlayback()
+      this.startAutomationLoop()
+      session = await this.inspectSession()
+      return this.createLearningResult(session, '已恢复当前学习，系统会继续监控播放进度并自动推进下一节。', 'none')
+    }
+
+    return this.startLearning()
   }
 
   async resumeManagedSession(): Promise<RecorderState> {
@@ -329,8 +352,10 @@ export class BrowserRecorderService {
   }
 
   async openBrowser(targetUrl?: string): Promise<RecorderState> {
-    const nextUrl = targetUrl?.trim() || this.state.baseUrl || DEFAULT_COURSE_URL
+    const requestedUrl = targetUrl?.trim()
+    const nextUrl = requestedUrl || this.state.baseUrl || DEFAULT_COURSE_URL
     await mkdir(this.state.recordingsPath, { recursive: true })
+    await this.restoreManagedSessionStateIfNeeded()
     this.networkLogFile = join(this.state.recordingsPath, 'live-network-log.jsonl')
     this.setState({
       status: 'launching',
@@ -340,17 +365,23 @@ export class BrowserRecorderService {
     })
 
     try {
-      const webContents = await this.ensureManagedWebContents()
-      this.applyManagedViewBounds()
+      const learningWindow = await this.ensureLearningWindow({ reveal: true })
+      const webContents = learningWindow.webContents
 
       const currentUrl = webContents.getURL()
       const shouldLoad =
-        !currentUrl || currentUrl === 'about:blank' || currentUrl !== nextUrl
+        Boolean(requestedUrl) || !currentUrl || currentUrl === 'about:blank'
 
       if (shouldLoad) {
         await webContents.loadURL(nextUrl)
       }
 
+      if (learningWindow.isMinimized()) {
+        learningWindow.restore()
+      }
+      learningWindow.show()
+      learningWindow.focus()
+      learningWindow.moveTop()
       webContents.focus()
       await sleep(500)
       await this.refreshActivePage()
@@ -416,7 +447,7 @@ export class BrowserRecorderService {
 
     this.setState({
       isRecording: false,
-      status: this.managedView ? 'ready' : 'idle'
+      status: this.learningWindow ? 'ready' : 'idle'
     })
     await this.persistTrace()
     return this.getState()
@@ -432,30 +463,27 @@ export class BrowserRecorderService {
 
   async dispose(): Promise<void> {
     this.stopAutomationLoop()
+    await this.persistManagedSessionState().catch(() => undefined)
+    if (this.sessionPersistTimer) {
+      clearTimeout(this.sessionPersistTimer)
+      this.sessionPersistTimer = null
+    }
 
     for (const auxiliaryWindow of this.auxiliaryWindows) {
       auxiliaryWindow.destroy()
     }
     this.auxiliaryWindows.clear()
 
-    if (this.hostWindow && this.managedView) {
-      this.hostWindow.contentView.removeChildView(this.managedView)
+    if (this.learningWindow && !this.learningWindow.isDestroyed()) {
+      this.learningWindow.close()
     }
 
-    if (this.managedView && !this.managedView.webContents.isDestroyed()) {
-      this.managedView.webContents.close({ waitForBeforeUnload: false })
-    }
-
-    this.managedView = null
+    this.learningWindow = null
   }
 
-  private readonly handleHostLayoutChange = () => {
-    this.applyManagedViewBounds()
-  }
-
-  private readonly handleHostClosed = () => {
-    this.hostWindow = null
-  }
+  private readonly handleControlClosed = () => {
+    this.controlWindow = null
+  };
 
   private setState(partial: Partial<RecorderState>): void {
     this.state = {
@@ -465,20 +493,84 @@ export class BrowserRecorderService {
     this.onStateChange?.(this.getState())
   }
 
-  private async ensureManagedView(): Promise<WebContentsView> {
-    if (this.managedView && !this.managedView.webContents.isDestroyed()) {
-      if (this.hostWindow) {
-        this.hostWindow.contentView.addChildView(this.managedView)
+  private attachSessionPersistence(): void {
+    this.managedSession.cookies.on('changed', () => {
+      this.schedulePersistManagedSessionState()
+    })
+  }
+
+  private schedulePersistManagedSessionState(): void {
+    if (this.sessionPersistTimer) {
+      clearTimeout(this.sessionPersistTimer)
+    }
+
+    this.sessionPersistTimer = setTimeout(() => {
+      this.sessionPersistTimer = null
+      void this.persistManagedSessionState()
+    }, 500)
+  }
+
+  private async restoreManagedSessionStateIfNeeded(): Promise<void> {
+    if (this.sessionStateLoaded) {
+      return
+    }
+
+    this.sessionStateLoaded = true
+    await mkdir(dirname(this.sessionStateFile), { recursive: true }).catch(() => undefined)
+
+    const stored = await readFile(this.sessionStateFile, 'utf8')
+      .then((content) => JSON.parse(content) as { cookies?: Electron.Cookie[] } | null)
+      .catch(() => null)
+
+    const cookies = stored?.cookies ?? []
+    for (const cookie of cookies) {
+      const details = toCookieSetDetails(cookie)
+      if (!details) {
+        continue
       }
-      this.applyManagedViewBounds()
-      return this.managedView
+
+      await this.managedSession.cookies.set(details).catch(() => undefined)
     }
 
-    if (!this.hostWindow) {
-      throw new Error('主窗口还没有准备好，暂时无法嵌入学习页。')
+    await this.managedSession.cookies.flushStore().catch(() => undefined)
+  }
+
+  private async persistManagedSessionState(): Promise<void> {
+    await mkdir(dirname(this.sessionStateFile), { recursive: true }).catch(() => undefined)
+    const cookies = await this.managedSession.cookies.get({}).catch(() => [])
+    const payload = {
+      savedAt: new Date().toISOString(),
+      cookies
     }
 
-    const view = new WebContentsView({
+    await writeFile(this.sessionStateFile, JSON.stringify(payload, null, 2), 'utf8').catch(() => undefined)
+    await this.managedSession.cookies.flushStore().catch(() => undefined)
+  }
+
+  private async ensureLearningWindow(options?: { reveal?: boolean }): Promise<BrowserWindow> {
+    const reveal = options?.reveal === true
+
+    if (this.learningWindow && !this.learningWindow.isDestroyed()) {
+      if (reveal) {
+        if (this.learningWindow.isMinimized()) {
+          this.learningWindow.restore()
+        }
+        this.learningWindow.show()
+        this.learningWindow.focus()
+        this.learningWindow.moveTop()
+      }
+      return this.learningWindow
+    }
+
+    const window = new BrowserWindow({
+      width: 1440,
+      height: 940,
+      minWidth: 1080,
+      minHeight: 720,
+      title: '观看助手 · 学习页',
+      backgroundColor: '#091019',
+      autoHideMenuBar: true,
+      show: true,
       webPreferences: {
         partition: MANAGED_PARTITION,
         contextIsolation: true,
@@ -488,20 +580,37 @@ export class BrowserRecorderService {
       }
     })
 
-    view.setBackgroundColor('#091019')
-    this.hostWindow.contentView.addChildView(view)
-    this.managedView = view
+    if (reveal) {
+      window.show()
+      window.focus()
+      window.moveTop()
+    }
 
-    this.attachManagedWebContents(view.webContents)
+    window.on('closed', () => {
+      if (this.learningWindow === window) {
+        this.learningWindow = null
+        this.popupExpectation = null
+        this.lastPlaybackObservation = null
+        this.lastResumeAppliedKey = null
+        this.setState({
+          isBrowserOpen: false,
+          status: this.state.isRecording ? 'recording' : 'idle',
+          activePageTitle: undefined,
+          activePageUrl: undefined
+        })
+      }
+    })
+
+    this.learningWindow = window
+    this.attachManagedWebContents(window.webContents)
     this.attachNetworkObservers()
-    this.applyManagedViewBounds()
 
-    return view
+    return window
   }
 
   private async ensureManagedWebContents(targetUrl?: string): Promise<WebContents> {
-    const view = await this.ensureManagedView()
-    const webContents = view.webContents
+    const window = await this.ensureLearningWindow()
+    const webContents = window.webContents
     const currentUrl = webContents.getURL()
 
     if ((!currentUrl || currentUrl === 'about:blank') && targetUrl) {
@@ -510,27 +619,6 @@ export class BrowserRecorderService {
     }
 
     return webContents
-  }
-
-  private applyManagedViewBounds(): void {
-    if (!this.managedView) {
-      return
-    }
-
-    if (!this.hostWindow || this.hostWindow.isDestroyed()) {
-      return
-    }
-
-    const bounds = this.browserBounds
-    if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
-      this.managedView.setVisible(false)
-      this.managedView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
-      return
-    }
-
-    this.hostWindow.contentView.addChildView(this.managedView)
-    this.managedView.setBounds(bounds)
-    this.managedView.setVisible(true)
   }
 
   private attachManagedWebContents(webContents: WebContents): void {
@@ -752,7 +840,7 @@ export class BrowserRecorderService {
   }
 
   private async captureArtifacts(eventId: string): Promise<{ screenshotPath?: string; snapshotPath?: string }> {
-    if (!this.runDir || !this.managedView || this.managedView.webContents.isDestroyed()) {
+    if (!this.runDir || !this.learningWindow || this.learningWindow.webContents.isDestroyed()) {
       return {}
     }
 
@@ -760,7 +848,7 @@ export class BrowserRecorderService {
     const snapshotPath = join('snapshots', `${eventId}.html`)
     let html: string | undefined
 
-    const image = await this.managedView.webContents.capturePage().catch(() => null)
+    const image = await this.learningWindow.webContents.capturePage().catch(() => null)
     if (image) {
       await writeFile(join(this.runDir, screenshotPath), image.toPNG()).catch(() => undefined)
     }
@@ -785,7 +873,7 @@ export class BrowserRecorderService {
       runId: this.runId,
       generatedAt: new Date().toISOString(),
       baseUrl: this.state.baseUrl,
-      profilePath: this.state.profilePath,
+      sessionDataPath: this.state.sessionDataPath,
       activePageUrl: this.state.activePageUrl,
       activePageTitle: this.state.activePageTitle,
       eventCount: this.traceEvents.length,
@@ -881,7 +969,7 @@ export class BrowserRecorderService {
     if (session.loginStatus === 'logged-out' || session.loginFormVisible) {
       return this.createLearningResult(
         session,
-        '当前尚未登录。请在内置学习页里手动完成登录，系统会持续检测，一旦登录成功会自动继续进入学习。',
+        '当前尚未登录。请在独立学习窗口里手动完成登录，系统会持续检测，一旦登录成功会自动继续进入学习。',
         'manual-attention'
       )
     }
@@ -914,8 +1002,8 @@ export class BrowserRecorderService {
     if (
       this.state.isRecording ||
       this.automationBusy ||
-      !this.managedView ||
-      this.managedView.webContents.isDestroyed()
+      !this.learningWindow ||
+      this.learningWindow.webContents.isDestroyed()
     ) {
       return
     }
@@ -987,6 +1075,29 @@ export class BrowserRecorderService {
     let session = await this.inspectSession()
     if (session.loginStatus === 'unknown') {
       await sleep(1_200)
+      session = await this.inspectSession()
+    }
+
+    return session
+  }
+
+  private async stabilizeLearningSession(
+    initial: LearningSessionState,
+    timeoutMs: number
+  ): Promise<LearningSessionState> {
+    let session = initial
+    const deadline = Date.now() + timeoutMs
+
+    while (Date.now() < deadline) {
+      if (session.routeKind === 'video-play' || session.video.exists) {
+        return session
+      }
+
+      if (session.loginStatus !== 'logged-in') {
+        return session
+      }
+
+      await sleep(350)
       session = await this.inspectSession()
     }
 
@@ -1193,10 +1304,19 @@ export class BrowserRecorderService {
     await sleep(500)
   }
 
+  private async pauseVideoPlayback(): Promise<void> {
+    const clicked = await this.clickManagedAction('video-play-button')
+    if (!clicked) {
+      await this.evaluateInManagedView(forcePausePlaybackOnPage).catch(() => undefined)
+    }
+
+    await sleep(300)
+  }
+
   private async waitForManagedUrlMatch(fragment: string, timeoutMs: number): Promise<boolean> {
     const start = Date.now()
     while (Date.now() - start < timeoutMs) {
-      const currentUrl = this.managedView?.webContents.getURL() ?? ''
+      const currentUrl = this.learningWindow?.webContents.getURL() ?? ''
       if (currentUrl.includes(fragment)) {
         return true
       }
@@ -1207,7 +1327,7 @@ export class BrowserRecorderService {
   }
 
   private async refreshActivePage(): Promise<void> {
-    if (!this.managedView || this.managedView.webContents.isDestroyed()) {
+    if (!this.learningWindow || this.learningWindow.webContents.isDestroyed()) {
       return
     }
 
@@ -1267,7 +1387,7 @@ export class BrowserRecorderService {
       height: 860,
       minWidth: 960,
       minHeight: 640,
-      parent: this.hostWindow ?? undefined,
+      parent: this.learningWindow ?? this.controlWindow ?? undefined,
       title: '辅助页面',
       backgroundColor: '#091019',
       webPreferences: {
@@ -1309,15 +1429,14 @@ export class BrowserRecorderService {
   }
 
   private async dispatchManagedClick(point: ClickPoint): Promise<boolean> {
-    if (!this.managedView || this.managedView.webContents.isDestroyed()) {
+    if (!this.learningWindow || this.learningWindow.webContents.isDestroyed()) {
       return false
     }
 
     try {
-      const webContents = this.managedView.webContents
+      const webContents = this.learningWindow.webContents
       const x = Math.round(point.x)
       const y = Math.round(point.y)
-      webContents.focus()
       webContents.sendInputEvent({ type: 'mouseMove', x, y, movementX: 0, movementY: 0 })
       await sleep(40)
       webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 })
@@ -1331,11 +1450,11 @@ export class BrowserRecorderService {
   }
 
   private async dispatchManagedMouseMove(point: ClickPoint): Promise<void> {
-    if (!this.managedView || this.managedView.webContents.isDestroyed()) {
+    if (!this.learningWindow || this.learningWindow.webContents.isDestroyed()) {
       return
     }
 
-    const webContents = this.managedView.webContents
+    const webContents = this.learningWindow.webContents
     webContents.sendInputEvent({
       type: 'mouseMove',
       x: Math.round(point.x),
@@ -1366,25 +1485,6 @@ function defaultAppSettings(): AppSettings {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function normalizeViewportBounds(bounds: BrowserViewportBounds | null): Rectangle | null {
-  if (!bounds) {
-    return null
-  }
-
-  const normalized = {
-    x: Math.max(0, Math.round(bounds.x)),
-    y: Math.max(0, Math.round(bounds.y)),
-    width: Math.max(0, Math.round(bounds.width)),
-    height: Math.max(0, Math.round(bounds.height))
-  }
-
-  if (normalized.width <= 0 || normalized.height <= 0) {
-    return null
-  }
-
-  return normalized
 }
 
 function isCourseAppUrl(url: string): boolean {
@@ -1447,6 +1547,26 @@ function extractUploadData(details: Electron.OnBeforeRequestListenerDetails): st
   })
 
   return chunks.join('&')
+}
+
+function toCookieSetDetails(cookie: Electron.Cookie): Electron.CookiesSetDetails | null {
+  const domain = (cookie.domain ?? '').replace(/^\./, '')
+  if (!domain || !cookie.name) {
+    return null
+  }
+
+  const url = `${cookie.secure ? 'https' : 'http'}://${domain}${cookie.path || '/'}`
+  return {
+    url,
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    path: cookie.path,
+    secure: cookie.secure,
+    httpOnly: cookie.httpOnly,
+    expirationDate: cookie.expirationDate,
+    sameSite: cookie.sameSite
+  }
 }
 
 function headerValue(
@@ -1541,6 +1661,23 @@ function readLearningSessionFromPage(): LearningSessionState {
   const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim()
   const textFrom = (selector: string) => normalize(document.querySelector(selector)?.textContent)
   const currentUrl = window.location.href
+  const appEl = document.querySelector('#App') as (HTMLElement & { __vue__?: any }) | null
+  const walkVm = (vm: any, seen = new Set<any>()): any => {
+    if (!vm || seen.has(vm)) {
+      return null
+    }
+    seen.add(vm)
+    if (vm.$refs?.player) {
+      return vm
+    }
+    for (const child of vm.$children ?? []) {
+      const found = walkVm(child, seen)
+      if (found) {
+        return found
+      }
+    }
+    return null
+  }
   const isVisible = (node: Element | null): boolean => {
     if (!(node instanceof HTMLElement)) {
       return false
@@ -1548,6 +1685,9 @@ function readLearningSessionFromPage(): LearningSessionState {
     const style = window.getComputedStyle(node)
     return style.display !== 'none' && style.visibility !== 'hidden'
   }
+  const rootVm = appEl?.__vue__
+  const playerHostVm = walkVm(rootVm)
+  const playObj = playerHostVm?.$store?.state?.playObj
 
   const hasProtectedNav = Array.from(document.querySelectorAll('.nav_bar .name'))
     .some((node) => isVisible(node))
@@ -1563,7 +1703,10 @@ function readLearningSessionFromPage(): LearningSessionState {
     Boolean(document.querySelector('.detail .detail_top .title')) ||
     Boolean(document.querySelector('.uncomplete_course'))
   const hasVideoPage =
-    Boolean(document.querySelector('.video_center .title')) || Boolean(document.querySelector('#player video'))
+    Boolean(document.querySelector('.video_center .title')) ||
+    Boolean(document.querySelector('#player video')) ||
+    Boolean(playerHostVm?.$refs?.player) ||
+    Boolean(playObj)
   const phoneInput = document.querySelector('input[placeholder*="手机号"]')
   const passwordInput = document.querySelector('input[placeholder*="密码"], input[type="password"]')
   const hasLoginWidget =
@@ -1613,8 +1756,16 @@ function readLearningSessionFromPage(): LearningSessionState {
     .slice(0, 20)
 
   const videoElement = document.querySelector('video')
-  const currentCourseTitle = textFrom('.video_center .title') || textFrom('.header_loder .wrapper span:last-child')
-  const currentChapterTitle = textFrom('.menu_item.currentChapter span')
+  const currentCourseTitle =
+    textFrom('.video_center .title') ||
+    textFrom('.header_loder .wrapper span:last-child') ||
+    normalize(playObj?.course_name) ||
+    normalize(playObj?.courseName)
+  const currentChapterTitle =
+    textFrom('.menu_item.currentChapter span') ||
+    normalize(playObj?.sco_name) ||
+    normalize(playObj?.chapter_name) ||
+    normalize(playObj?.title)
 
   const parsePlayerTime = (value: string | null | undefined): number | undefined => {
     const raw = normalize(value)
@@ -1655,6 +1806,7 @@ function readLearningSessionFromPage(): LearningSessionState {
       : undefined)
 
   const loginStatus = (() => {
+    if (Boolean(playerHostVm?.$refs?.player) || Boolean(playObj)) return 'logged-in'
     if (routeKind === 'video-play' || routeKind === 'course-detail') return 'logged-in'
     if (routeKind === 'my-classes' && hasProtectedNav && hasClassList) return 'logged-in'
     if (routeKind === 'my-course' && hasProtectedNav) return 'logged-in'
@@ -1875,6 +2027,7 @@ function muteVideosOnPage(): void {
 
 function applyTrackedResumeOnPage(backtrackSeconds: number) {
   const appEl = document.querySelector('#App') as (HTMLElement & { __vue__?: any }) | null
+  const GAP_TOLERANCE_SECONDS = 3
   const walk = (vm: any, seen = new Set<any>()): any => {
     if (!vm || seen.has(vm)) {
       return null
@@ -1895,29 +2048,101 @@ function applyTrackedResumeOnPage(backtrackSeconds: number) {
   const rootVm = appEl?.__vue__
   const hostVm = walk(rootVm)
   const playObj = hostVm?.$store?.state?.playObj
+  const rawSegmentsSource =
+    playObj?.startEndVos ??
+    playObj?.progress?.startEndVos ??
+    playObj?.sco_progress?.startEndVos ??
+    playObj?.playRecord?.startEndVos ??
+    []
+  const rawSegments =
+    typeof rawSegmentsSource === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(rawSegmentsSource)
+          } catch {
+            return []
+          }
+        })()
+      : rawSegmentsSource
   const lessonLocation = Number(playObj?.lesson_location ?? 0)
+  const duration = Number(playObj?.duration ?? (document.querySelector('video') as HTMLVideoElement | null)?.duration ?? 0)
   const target = Math.max(lessonLocation - backtrackSeconds, 0)
   const video = document.querySelector('video')
 
-  if (!Number.isFinite(lessonLocation) || lessonLocation <= 1 || target <= 0) {
+  const segments = Array.isArray(rawSegments)
+    ? rawSegments
+        .map((entry) => ({
+          start: Number(entry?.start ?? 0),
+          end: Number(entry?.end ?? 0)
+        }))
+        .filter((entry) => Number.isFinite(entry.start) && Number.isFinite(entry.end))
+        .map((entry) => ({
+          start: Math.max(0, Math.min(entry.start, entry.end)),
+          end: Math.max(entry.start, entry.end)
+        }))
+        .sort((left, right) => left.start - right.start || left.end - right.end)
+    : []
+
+  let coveredUntil = 0
+  let hasContinuousCoverageFromStart = false
+
+  for (const segment of segments) {
+    if (!hasContinuousCoverageFromStart) {
+      if (segment.start > GAP_TOLERANCE_SECONDS) {
+        break
+      }
+      coveredUntil = Math.max(coveredUntil, segment.end)
+      hasContinuousCoverageFromStart = true
+      continue
+    }
+
+    if (segment.start <= coveredUntil + GAP_TOLERANCE_SECONDS) {
+      coveredUntil = Math.max(coveredUntil, segment.end)
+      continue
+    }
+
+    break
+  }
+
+  const derivedResumePoint = hasContinuousCoverageFromStart ? coveredUntil : lessonLocation
+  const targetFromTrack = Math.max(derivedResumePoint - backtrackSeconds, 0)
+  const effectiveTarget = Number.isFinite(targetFromTrack) && targetFromTrack > 0 ? targetFromTrack : target
+
+  if (
+    (!Number.isFinite(lessonLocation) || lessonLocation <= 1) &&
+    (!Number.isFinite(derivedResumePoint) || derivedResumePoint <= 1)
+  ) {
     return {
       applied: false,
       lessonLocation,
-      target,
+      target: effectiveTarget,
+      derivedResumePoint,
+      segments,
       reason: 'no-valid-progress'
+    }
+  }
+
+  if (Number.isFinite(duration) && duration > 0 && derivedResumePoint >= duration - GAP_TOLERANCE_SECONDS) {
+    return {
+      applied: false,
+      lessonLocation,
+      target: effectiveTarget,
+      derivedResumePoint,
+      segments,
+      reason: 'already-near-complete'
     }
   }
 
   let applied = false
 
   if (hostVm?.$refs?.player?.set_currentTime) {
-    hostVm.$refs.player.set_currentTime(target)
+    hostVm.$refs.player.set_currentTime(effectiveTarget)
     applied = true
   }
 
   if (video instanceof HTMLVideoElement) {
     try {
-      video.currentTime = target
+      video.currentTime = effectiveTarget
       applied = true
     } catch {
       // Ignore direct video seek failures.
@@ -1933,7 +2158,9 @@ function applyTrackedResumeOnPage(backtrackSeconds: number) {
   return {
     applied,
     lessonLocation,
-    target
+    target: effectiveTarget,
+    derivedResumePoint,
+    segments
   }
 }
 
@@ -1952,6 +2179,18 @@ function forceResumePlaybackOnPage(): void {
   document.querySelectorAll('video').forEach((node) => {
     if (node instanceof HTMLVideoElement) {
       void node.play().catch(() => undefined)
+    }
+  })
+}
+
+function forcePausePlaybackOnPage(): void {
+  document.querySelectorAll('video').forEach((node) => {
+    if (node instanceof HTMLVideoElement) {
+      try {
+        node.pause()
+      } catch {
+        // Ignore pause failures.
+      }
     }
   })
 }
