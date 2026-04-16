@@ -89,7 +89,7 @@ release/
 
 工作流会分别在：
 
-- `macos-latest` 上构建 `dmg / zip`
+- `macos-latest` 上构建 `dmg`
 - `windows-latest` 上构建 `nsis exe`
 
 如果是标签发布，构建完成后会自动把安装包作为 Release 资产上传到 GitHub Releases。

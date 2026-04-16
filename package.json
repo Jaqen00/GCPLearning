@@ -11,7 +11,7 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "dist:dir": "npm run build && electron-builder --dir --publish never",
-    "dist:mac": "npm run build && electron-builder --mac dmg zip --publish never",
+    "dist:mac": "npm run build && electron-builder --mac dmg --publish never",
     "dist:win": "npm run build && electron-builder --win nsis --publish never"
   },
   "repository": {
@@ -45,6 +45,7 @@
       "package.json"
     ],
     "asar": true,
+    "compression": "maximum",
     "npmRebuild": false,
     "mac": {
       "icon": "build/icon.icns",
@@ -52,13 +53,6 @@
       "target": [
         {
           "target": "dmg",
-          "arch": [
-            "arm64",
-            "x64"
-          ]
-        },
-        {
-          "target": "zip",
           "arch": [
             "arm64",
             "x64"

@@ -19,10 +19,12 @@ jobs:
             name: macos
             script: npm run dist:mac
             artifact_name: macos-installers
+            artifact_path: release/*.dmg
           - os: windows-latest
             name: windows
             script: npm run dist:win
             artifact_name: windows-installers
+            artifact_path: release/*.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -49,7 +51,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: release/**
+          path: ${{ matrix.artifact_path }}
           if-no-files-found: error
 
   publish:
@@ -70,5 +72,4 @@ jobs:
           generate_release_notes: true
           files: |
             release-artifacts/**/*.dmg
-            release-artifacts/**/*.zip
             release-artifacts/**/*.exe
