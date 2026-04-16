@@ -11,3 +11,7 @@ traces/
 # macOS / editor noise
 .idea/
 .vscode/
+
+# build intermediates
+build/icon.iconset/
+build/generated/icon-*.png

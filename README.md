@@ -114,6 +114,11 @@ build/
 - `build/icon.icns`
 - `build/icon.ico`
 
+当前仓库已经生成了一套基础图标资源：
+
+- [build/icon.icns](build/icon.icns)
+- [build/icon.ico](build/icon.ico)
+
 ## 项目结构
 
 ```text

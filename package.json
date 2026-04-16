@@ -47,6 +47,7 @@
     "asar": true,
     "npmRebuild": false,
     "mac": {
+      "icon": "build/icon.icns",
       "category": "public.app-category.education",
       "target": [
         {
@@ -67,6 +68,7 @@
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
